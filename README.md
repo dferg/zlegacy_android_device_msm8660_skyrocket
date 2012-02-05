@@ -28,4 +28,10 @@ git clone git://github.com/dferg/android_device_msm8660_skyrocket.git device/qco
 </pre>
 
 
-
+Building
+--------
+At the suggestion of romracer on XDA, we are using the msm8660_defconfig.  Use these commands to build:
+<pre>
+choosecombo 1 2 msm8660_surf eng
+make -j4 KERNEL_DEFCONFIG=msm8660_defconfig
+</pre>
