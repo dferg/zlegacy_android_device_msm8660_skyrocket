@@ -78,20 +78,12 @@ foreach (@source_files) {
 	# Execute the command
 	$cmd = "$variables{ADB_BIN} pull $_ $variables{DIR_COMMON}$_";
 	print "\n$cmd\n";
-	$rc = system($cmd);
-	if ($rc & 127) {
-		print STDERR "Aborted.\n";
-		exit 1;
-	}
-	$rc = $rc >> 8;
-	if ($rc) {
-		print STDERR "Command failed: '$cmd'\n";
-		exit 1;
-	}
+	&run_command($cmd);
 }
 
 # Create the device vendor blobs mk fragment
 print "\nCreating make fragment: $variables{DEVICE_VENDOR_BLOBS_MK}\n";
+make_path(dirname($variables{DEVICE_VENDOR_BLOBS_MK}));
 open FOUT, ">$variables{DEVICE_VENDOR_BLOBS_MK}" or die "Can't open $variables{DEVICE_VENDOR_BLOBS_MK} for writing.";
 print FOUT $copyright_notice;
 print FOUT <<EOF;
@@ -106,6 +98,7 @@ close FOUT;
 
 # Create the common vendor blobs mk fragment
 print "Creating make fragment: $variables{C1_VENDOR_BLOBS_MK}\n";
+make_path(dirname($variables{C1_VENDOR_BLOBS_MK}));
 open FOUT, ">$variables{C1_VENDOR_BLOBS_MK}" or die "Can't open $variables{C1_VENDOR_BLOBS_MK} for writing.";
 print FOUT $copyright_notice;
 print FOUT <<EOF;
@@ -136,7 +129,12 @@ foreach(@source_files) {
 print FOUT "\n";
 close FOUT;
 
-#system("./setup-makefiles.sh");
+$cmd = "./setup-makefiles.sh";
+print "Running $cmd\n";
+&run_command($cmd);
+
+
+
 
 sub trim_whitespace {
 	my($s) = @_;
@@ -200,3 +198,15 @@ sub verify_variables {
 	}
 }
 
+sub run_command {
+	my $rc = system($cmd);
+	if ($rc & 127) {
+		print STDERR "Aborted.\n";
+		exit 1;
+	}
+	$rc = $rc >> 8;
+	if ($rc) {
+		print STDERR "Command failed: '$cmd'\n";
+		exit 1;
+	}
+}
