@@ -42,6 +42,7 @@ make -j4 KERNEL_DEFCONFIG=msm8660_defconfig
 Building with proprietary blobs
 -------------------------------
 This build does not complete without other hacks to the tree.  I will try to outline them:
+
 * comment out "LOCAL_WHOLE_STATIC_LIBRARIES += libqc-dalvik" in dalvik/vm/Dvm.mk
 * comment out "LOCAL_WHOLE_STATIC_LIBRARIES += libqc-skia" in external/skia/Android.mk
 * comment out "LOCAL_WHOLE_STATIC_LIBRARIES += libqc-sqlite" in external/sqlite/dist/Android.mk
