@@ -35,6 +35,7 @@ framebuffer, no wifi, no cel, no gps, no bluetooth, no sound, etc..)
 
 At the suggestion of romracer on XDA, we are using the msm8660_defconfig.  Use these commands to build:
 <pre>
+source build/envsetup.sh
 choosecombo 1 2 msm8660_surf eng
 make -j4 KERNEL_DEFCONFIG=msm8660_defconfig
 </pre>
@@ -55,6 +56,9 @@ However, adb does work so we can debug.
 
 Use these commands to build:
 <pre>
+cd device/qcom/msm8660_surf
+./extract-files.pl
+source build/envsetup.sh
 QC_PROP=true choosecombo 1 2 msm8660_surf eng
 QC_PROP=true make -j4 KERNEL_DEFCONFIG=msm8660_defconfig
 </pre>
