@@ -28,10 +28,34 @@ git clone git://github.com/dferg/android_device_msm8660_skyrocket.git device/qco
 </pre>
 
 
-Building
---------
+Building without proprietary blobs
+----------------------------------
+This results in a build that boots but most hardware does not work.  (Jerky
+framebuffer, no wifi, no cel, no gps, no bluetooth, no sound, etc..)
+
 At the suggestion of romracer on XDA, we are using the msm8660_defconfig.  Use these commands to build:
 <pre>
 choosecombo 1 2 msm8660_surf eng
 make -j4 KERNEL_DEFCONFIG=msm8660_defconfig
 </pre>
+
+Building with proprietary blobs
+-------------------------------
+This build does not complete without other hacks to the tree.  I will try to outline them:
+- comment out "LOCAL_WHOLE_STATIC_LIBRARIES += libqc-dalvik" in dalvik/vm/Dvm.mk
+- comment out "LOCAL_WHOLE_STATIC_LIBRARIES += libqc-skia" in external/skia/Android.mk
+- comment out "LOCAL_WHOLE_STATIC_LIBRARIES += libqc-sqlite" in external/sqlite/dist/Android.mk
+- add "static bool isSeperatedStream(stream_type stream);" to frameworks/base/include/media/AudioSystem.mk just after isBluetoothScoDevice()
+- add "bool AudioSystem::isSeperatedStream(stream_type stream) { return true; }" to frameworks/base/media/libmedia/AudioSystem.cpp
+- remove "libaudio-msm8660" from line "msm8660_dirs := $(common_msm_dirs) libaudio-msm8660 liboverlay libcopybit dspcrashd" in hardware/msm7k/Android.mk
+
+The resulting build does not boot fully.  It crashes before displaying anything on the screen.
+However, adb does work so we can debug.
+
+Use these commands to build:
+<pre>
+QC_PROP=true choosecombo 1 2 msm8660_surf eng
+QC_PROP=true make -j4 KERNEL_DEFCONFIG=msm8660_defconfig
+</pre>
+
+
