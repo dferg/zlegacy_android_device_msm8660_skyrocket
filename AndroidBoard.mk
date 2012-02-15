@@ -85,9 +85,9 @@ ALL_PREBUILT += $(file)
 $(file) : $(LOCAL_PATH)/init.qcom.modem_links.sh | $(ACP)
 	$(transform-prebuilt-to-target)
 
-file := $(TARGET_OUT)/etc/init.qcom.mdm_links.sh
+file := $(TARGET_OUT)/etc/init.qcom.post_boot.sh
 ALL_PREBUILT += $(file)
-$(file) : $(LOCAL_PATH)/init.qcom.mdm_links.sh | $(ACP)
+$(file) : $(LOCAL_PATH)/init.qcom.post_boot.sh | $(ACP)
 	$(transform-prebuilt-to-target)
 
 ifeq ($(strip $(BOARD_HAS_QCOM_WLAN)),true)

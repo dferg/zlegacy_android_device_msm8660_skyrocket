@@ -26,38 +26,72 @@
 # IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 #
+on boot
+    chown system system /dev/accelerometer
+    chown system system /dev/akm8975
+    chmod 664	/dev/accelerometer
+    chmod 664	/dev/akm8975
+    chown system system /sys/class/K3G_GYRO-dev/k3g/gyro_selftest_dps
+    chown system system /sys/class/sec/gsensorcal/calibration
 
-# on emmc mount the partition containing firmware
+# ko files for vibrator
+    insmod /lib/modules/vibrator.ko
+
+    chown system system /sys/class/timed_output/vibrator/enable
+	chmod 0664 /sys/class/timed_output/vibrator/enable    
+
 on emmc-fs
-   mkdir /tombstones 0771 system system
-   mount ext4 /dev/block/mmcblk0p16 /tombstones nosuid nodev barrier=1
-   mkdir /tombstones/modem 0771 system system
-   mkdir /tombstones/mdm 0771 system system
-   mkdir /tombstones/lpass 0771 system system
-   mkdir /firmware 0771 system system
-   wait /dev/block/mmcblk0p1
-   mount vfat /dev/block/mmcblk0p1 /firmware ro shortname=lower
-   exec /system/bin/sh /system/etc/init.qcom.modem_links.sh
+    mount ext3 /dev/block/mmcblk0p24 /system remount rw
+    mkdir /system/etc/firmware/misc 0771 system system
+    wait /dev/block/mmcblk0p13
+    mount vfat /dev/block/mmcblk0p13 /system/etc/firmware/misc ro shortname=lower
+    mkdir /system/etc/firmware/misc_mdm 0771 system system
+    wait /dev/block/mmcblk0p17
+    mount vfat /dev/block/mmcblk0p17 /system/etc/firmware/misc_mdm ro shortname=lower
+    exec /system/bin/sh /system/etc/init.qcom.modem_links.sh
+    mount ext4 /dev/block/mmcblk0p24 /system remount ro barrier=0
+    mkdir /tombstones 0744 radio system
+    mount ext4 /dev/block/mmcblk0p27 /tombstones nosuid nodev barrier=1
+		chown radio system /tombstones
+		mkdir /tombstones/mdm 0744 radio system
+		chown radio system /tombstones/mdm
 
-    write /sys/devices/i2c-0/0-0024/cyttsp_update_fw 1
+on post-fs
+    wait /dev/ttyHSL1
+    mkdir /data/qcks 0770 system system
+
+	#SISO-PLAYREADY-CHANGES
+#DRM directory creation
+    mkdir /system/etc/security/.drm 0775
+    chown root root /system/etc/security/.drm
+    chmod 0775 /system/etc/security/.drm
+    # Added for testing DIVX DRM
+    mkdir /efs/.android 0777
+
+    # Added for Playready DRM Support
+    mkdir /data/data/.drm 0775
+   	chown drm system /data/data/.drm
+    	chmod 0775 /data/data/.drm
+
+    mkdir /data/data/.drm/.playready 0775
+  	chown drm system /data/data/.drm/.playready
+  	chmod 0775 /data/data/.drm/.playready
+
+# DRM directory creation
+    # DivX DRM	
+    mkdir /efs/.files 0777
+    mkdir /efs/.files/.dx1 0777
+    mkdir /efs/.files/.dm33 0777
+    mkdir /efs/.files/.mp301 0777
+#SISO-PLAYREADY-CHANGES
+
+#Added for MTP permission
+    chmod 0660 /dev/usb_mtp_gadget 
+    chown system system /dev/usb_mtp_gadget
+	
+	
 service kickstart /system/bin/qcks l
-    user system
     oneshot
-    disabled
-
-# Start kickstart if csfb or svlte2a target
-on property:ro.baseband=csfb
-    wait /dev/ttyHSL1
-    mkdir /data/qcks 0770 system system
-    exec /system/bin/sh /system/etc/init.qcom.mdm_links.sh
-    start kickstart
-
-on property:ro.baseband=svlte2a
-    wait /dev/ttyHSL1
-    mkdir /data/qcks 0770 system system
-    exec /system/bin/sh /system/etc/init.qcom.mdm_links.sh
-    start kickstart
-
 
 service dcvsd0 /system/bin/dcvsd -c 0 -f /data/misc/dcvsd/dcvsd0.conf
     user root
@@ -67,17 +101,32 @@ service dcvsd1 /system/bin/dcvsd -c 1 -f /data/misc/dcvsd/dcvsd1.conf
     user root
     disabled
 
+service dcvs0 /system/bin/dcvs --cpu=0 --slacktime=64
+    user root
+    disabled
+
+service dcvs1 /system/bin/dcvs --cpu=1 --slacktime=64
+    user root
+    disabled
+
 service mpdecision /system/bin/mpdecision --no_sleep --avg_comp
     user root
     disabled
 
-service thermald /system/bin/thermald
-    user root
-    disabled
+service immvibed /system/bin/immvibed
+    user shell
+    group shell
+    oneshot
 
-service qrngd /system/bin/qrngd -f
-    user root
+#on property:init.svc.samsungani=stopped
+#    start mpdecision
+
+#on property:init.svc.bootanim=stopped
+#    start mpdecision
 
 on property:ro.baseband=svlte2a
    setprop ro.config.ehrpd true
    setprop ro.config.svlte1x true
+
+service qrngd /system/bin/qrngd -f
+    user root

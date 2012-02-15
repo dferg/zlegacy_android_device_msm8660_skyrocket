@@ -33,97 +33,42 @@ PATH=/sbin:/system/sbin:/system/bin:/system/xbin
 export PATH
 
 # Check for images and set up symlinks
-cd /firmware/image
+cd /system/etc/firmware/misc/image
 
-# Get the list of files in /firmware/image
-# for which sym links have to be created
-
-fwfiles=`ls modem* q6* playrdy*`
-
-# Check if the links with similar names
-# have been created in /system/etc/firmware
-
-cd /system/etc/firmware
-linksNeeded=0
-
-# For everyfile in fwfiles check if
-# the corresponding file exists
-for fwfile in $fwfiles; do
-
-   # if (condition) does not seem to work
-   # with the android shell. Therefore
-   # make do with case statements instead.
-   # if a file named $fwfile is present
-   # no need to create links. If the file
-   # with the name $fwfile is not present
-   # need to create links.
-
-   case `ls $fwfile` in
-      $fwfile)
-         continue;;
-      *)
-         # file with $fwfile does not exist
-         # need to create links
-         linksNeeded=1
-         break;;
-   esac
-
-done
-
-# if links are needed mount the FS as read write
-case $linksNeeded in
-   1)
-      cd /firmware/image
-      mount -t ext4 -o remount,rw,barrier=0 /dev/block/mmcblk0p12 /system
-
-      #Adjust permissions for select files
-      chmod 4755 /system/bin/diag_mdlog
-      chmod 4755 /system/bin/btwlancoex
-      chmod 0755 /system/bin/ip
-      chmod 4755 /system/bin/usbhub
-      chmod  755 /system/bin/usbhub_init
-
-      case `ls modem.mdt 2>/dev/null` in
-         modem.mdt)
-            for imgfile in modem*; do
-               ln -s /firmware/image/$imgfile /system/etc/firmware/$imgfile 2>/dev/null
-            done
-            break;;
-        *)
-            # trying to log here but nothing will be logged since it is 
-            # early in the boot process. Is there a way to log this message?
-            log -p w -t PIL 8660 device but no modem image found;;
-      esac
-
-      case `ls q6.mdt 2>/dev/null` in
-         q6.mdt)
-            for imgfile in q6*; do
-               ln -s /firmware/image/$imgfile /system/etc/firmware/$imgfile 2>/dev/null
-            done
-            break;;
-         *)
-            log -p w -t PIL 8660 device but no q6 image found;;
-      esac
-
-      case `ls playrdy.mdt 2>/dev/null` in
-         playrdy.mdt)
-            for imgfile in playrdy*; do
-               ln -s /firmware/image/$imgfile /system/etc/firmware/$imgfile 2>/dev/null
-            done
-            break;;
-         *)
-            log -p w -t PIL 8660 device but no playready image found;;
-      esac
-
-      #remount file system as read only
-      mount -t ext4 -o remount,ro,barrier=0 /dev/block/mmcblk0p12 /system
-      break;;
-
-   *)
-      # Nothing to do. No links needed
-      break;;
+case `ls modem.mdt 2>/dev/null` in
+    modem.mdt)
+        for imgfile in modem*; do
+            ln -s /system/etc/firmware/misc/image/$imgfile /system/etc/firmware/$imgfile 2>/dev/null
+        done
+        break
+        ;;
+    *)
+        log -p w -t PIL 8660 device but no modem image found
+        ;;
 esac
 
-cd /
+case `ls q6.mdt 2>/dev/null` in
+    q6.mdt)
+        for imgfile in q6*; do
+            ln -s /system/etc/firmware/misc/image/$imgfile /system/etc/firmware/$imgfile 2>/dev/null
+        done
+        break
+        ;;
+    *)
+        log -p w -t PIL 8660 device but no q6 image found
+        ;;
+esac
 
+MISC_MDM=/system/etc/firmware/misc_mdm/image
+cd $MISC_MDM
+ln -s $MISC_MDM/amss.mbn /system/etc/firmware/amss.mbn 2>/dev/null
+ln -s $MISC_MDM/dsp1.mbn /system/etc/firmware/dsp1.mbn 2>/dev/null
+ln -s $MISC_MDM/dsp2.mbn /system/etc/firmware/dsp2.mbn 2>/dev/null
+ln -s $MISC_MDM/dbl.mbn /system/etc/firmware/dbl.mbn 2>/dev/null
+ln -s $MISC_MDM/osbl.mbn /system/etc/firmware/osbl.mbn 2>/dev/null
+ln -s $MISC_MDM/efs1.mbn /system/etc/firmware/efs1.mbn 2>/dev/null
+ln -s $MISC_MDM/efs2.mbn /system/etc/firmware/efs2.mbn 2>/dev/null
+ln -s $MISC_MDM/efs3.mbn /system/etc/firmware/efs3.mbn 2>/dev/null
+
+cd /
 
