@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 
-# Copyright (C) 2010 The Android Open Source Project
+# Copyright (C) 2012 David Ferguson
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 use File::Path     qw(make_path);
 use File::Basename qw(dirname basename);
 use Data::Dumper;
+use Getopt::Long;
 
 # Variable setup
 $cfgfile                                   = "extract-files.cfg";
@@ -44,6 +45,9 @@ $copyright_notice = <<EOF;
 # limitations under the License.
 
 EOF
+
+# Parse the command line options
+&parse_cmdline;
 
 # Read the config and verify defined variables
 &read_config($cfgfile);
@@ -76,7 +80,12 @@ foreach (@source_files) {
 	}
 
 	# Execute the command
-	$cmd = "$variables{ADB_BIN} pull $_ $variables{DIR_COMMON}$_";
+	if ( $opt_source eq "adb" ) {
+		$cmd = "$variables{ADB_BIN} pull $_ $dest_file";
+	} else {
+		$no_slash_source_file = $_; $no_slash_source_file =~ s/^\///;
+		$cmd = "cp $opt_source/$no_slash_source_file $dest_file";
+	}
 	print "\n$cmd\n";
 	&run_command($cmd);
 }
@@ -208,5 +217,17 @@ sub run_command {
 	if ($rc) {
 		print STDERR "Command failed: '$cmd'\n";
 		exit 1;
+	}
+}
+
+sub parse_cmdline {
+	$opt_source = "adb";
+	my $result = GetOptions( "source=s", \$opt_source );
+
+	if ($opt_source ne "adb") {
+		if ( !-d $opt_source ) {
+			print "ERROR: --source must be either 'adb' or a directory\n";
+			exit 1;
+		}
 	}
 }
