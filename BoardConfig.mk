@@ -9,9 +9,20 @@ ifeq ($(QC_PROP),true)
     HAVE_ADRENO200_SOURCE := true
     HAVE_ADRENO200_SC_SOURCE := true
     HAVE_ADRENO200_FIRMWARE := true
+
+    # Stubbed audio, just to get by crashes
+    BOARD_USES_GENERIC_AUDIO := true
+
+    # Compiles, but mediaserver crashes
     #BOARD_USES_QCOM_AUDIO_V2 := true
     #BOARD_USES_GENERIC_AUDIO := true
-    TARGET_PROVIDES_LIBAUDIO := true
+    #TARGET_PROVIDES_LIBAUDIO := true
+
+    # New idea to compile libaudio.so
+    #BOARD_USES_QCOM_AUDIO_V2 := true
+    #BOARD_USES_GENERIC_AUDIO := false
+    #TARGET_PROVIDES_LIBAUDIO := true
+
     BOARD_USE_QCOM_TESTONLY := true
     TARGET_USES_SF_BYPASS := true
     TARGET_USES_C2D_COMPOSITION := true
@@ -23,7 +34,7 @@ ifeq ($(QC_PROP),true)
     ifneq ($(BUILD_TINY_ANDROID), true)
     #BOARD_VENDOR_QCOM_GPS_LOC_API_AMSS_VERSION := 50001
     #BOARD_VENDOR_QCOM_GPS_LOC_API_HARDWARE := default
-    #BOARD_CAMERA_LIBRARIES := libcamera
+    BOARD_CAMERA_LIBRARIES := libcamera
     USE_CAMERA_STUB := true
     #BOARD_HAVE_BLUETOOTH := true
     #BOARD_HAVE_QCOM_FM := true
