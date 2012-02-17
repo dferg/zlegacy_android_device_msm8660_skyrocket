@@ -14,8 +14,6 @@ ifeq ($(QC_PROP),true)
     BOARD_USES_GENERIC_AUDIO := true
 
     # Compiles, but mediaserver crashes
-    #BOARD_USES_QCOM_AUDIO_V2 := true
-    #BOARD_USES_GENERIC_AUDIO := true
     #TARGET_PROVIDES_LIBAUDIO := true
 
     # New idea to compile libaudio.so
@@ -36,11 +34,21 @@ ifeq ($(QC_PROP),true)
     #BOARD_VENDOR_QCOM_GPS_LOC_API_HARDWARE := default
     BOARD_CAMERA_LIBRARIES := libcamera
     USE_CAMERA_STUB := true
-    #BOARD_HAVE_BLUETOOTH := true
+    BOARD_HAVE_BLUETOOTH := true
+    BOARD_HAVE_BLUETOOTH_BCM := true
     #BOARD_HAVE_QCOM_FM := true
     #BOARD_HAS_QCOM_WLAN := true
+
     #BOARD_WPA_SUPPLICANT_DRIVER := WEXT
-    #WPA_SUPPLICANT_VERSION := VER_0_6_X
+    #WPA_SUPPLICANT_VERSION      := VER_0_6_X
+    #WIFI_DRIVER_MODULE_PATH     := "/system/lib/modules/dhd.ko"
+    #WIFI_DRIVER_MODULE_NAME     := "dhd"
+    #WIFI_DRIVER_FW_STA_PATH     := "/system/etc/wifi/bcm4330_sta.bin"
+    #WIFI_DRIVER_FW_AP_PATH      := "/system/etc/wifi/bcm4330_aps.bin"
+    #WIFI_DRIVER_MODULE_ARG      := "firmware_path=/system/etc/wifi/bcm4330_mfg.bin nvram_path=/system/etc/wifi/nvram_mfg.txt"
+#hardware/libhardware_legacy/wifi/wifi.c:89: error: 'WIFI_SDIO_IF_DRIVER_MODULE_ARG' undeclared here (not in a function)
+
+
     #HAVE_QC_TIME_SERVICES := true
     endif   # !BUILD_TINY_ANDROID
 else
@@ -104,3 +112,19 @@ TARGET_SCORPION_BIONIC_PLDOFFS := 6
 TARGET_SCORPION_BIONIC_PLDSIZE := 128
 
 HAVE_CYTTSP_FW_UPGRADE := true
+
+BOARD_HAS_SDCARD_INTERNAL := true
+BOARD_HAS_INTERNAL_PARTITIONS := true
+
+BOARD_HAS_NO_SELECT_BUTTON := true
+# Use this flag if the board has a ext4 partition larger than 2gb
+BOARD_HAS_LARGE_FILESYSTEM := true
+TARGET_USERIMAGES_USE_EXT4 := true
+BOARD_HAS_NO_MISC_PARTITION := true
+BOARD_USES_MMCUTILS := true
+
+# Not used in CAF vold; CM7 vold uses these though
+BOARD_VOLD_EMMC_SHARES_DEV_MAJOR := true
+BOARD_VOLD_MAX_PARTITIONS := 28
+
+
