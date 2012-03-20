@@ -1,0 +1,1896 @@
+diff --git system/vold/Android.mk system/vold/Android.mk
+index e353a4f..60a5931 100644
+--- system/vold/Android.mk
++++ system/vold/Android.mk
+@@ -15,9 +15,11 @@ common_src_files := \
+ 	NetlinkHandler.cpp \
+ 	Volume.cpp \
+ 	DirectVolume.cpp \
++	AutoVolume.cpp \
+ 	logwrapper.c \
+ 	Process.cpp \
+ 	Fat.cpp \
++	Ntfs.cpp \
+ 	Loop.cpp \
+ 	Devmapper.cpp \
+ 	ResponseCode.cpp \
+@@ -36,7 +38,9 @@ common_shared_libraries := \
+ include $(CLEAR_VARS)
+ 
+ LOCAL_MODULE := libvold
+-
++ifeq ($(BOARD_USE_USB_MASS_STORAGE_SWITCH), true)
++LOCAL_CFLAGS += -DUSE_USB_MASS_STORAGE_SWITCH
++endif
+ LOCAL_SRC_FILES := $(common_src_files)
+ 
+ LOCAL_C_INCLUDES := $(common_c_includes)
+@@ -49,16 +53,34 @@ include $(BUILD_STATIC_LIBRARY)
+ 
+ include $(CLEAR_VARS)
+ 
++ifneq ($(BOARD_VOLD_MAX_PARTITIONS),)
++LOCAL_CFLAGS += -DVOLD_MAX_PARTITIONS=$(BOARD_VOLD_MAX_PARTITIONS)
++endif
++
++ifeq ($(BOARD_VOLD_EMMC_SHARES_DEV_MAJOR), true)
++LOCAL_CFLAGS += -DVOLD_EMMC_SHARES_DEV_MAJOR
++endif
++
++ifneq ($(TARGET_USE_CUSTOM_LUN_FILE_PATH),)
++LOCAL_CFLAGS += -DCUSTOM_LUN_FILE=\"$(TARGET_USE_CUSTOM_LUN_FILE_PATH)\"
++endif
++
++ifneq ($(TARGET_USE_CUSTOM_SECOND_LUN_NUM),)
++LOCAL_CFLAGS += -DCUSTOM_SECOND_LUN_NUM=$(TARGET_USE_CUSTOM_SECOND_LUN_NUM)
++endif
++
+ LOCAL_MODULE:= vold
+ 
++ifeq ($(BOARD_USE_USB_MASS_STORAGE_SWITCH), true)
++LOCAL_CFLAGS += -DUSE_USB_MASS_STORAGE_SWITCH
++endif
++
+ LOCAL_SRC_FILES := \
+ 	main.cpp \
+ 	$(common_src_files)
+ 
+ LOCAL_C_INCLUDES := $(common_c_includes)
+ 
+-LOCAL_CFLAGS := 
+-
+ LOCAL_SHARED_LIBRARIES := $(common_shared_libraries)
+ 
+ include $(BUILD_EXECUTABLE)
+@@ -71,8 +93,6 @@ LOCAL_MODULE:= vdc
+ 
+ LOCAL_C_INCLUDES := $(KERNEL_HEADERS)
+ 
+-LOCAL_CFLAGS := 
+-
+ LOCAL_SHARED_LIBRARIES := libcutils
+ 
+ include $(BUILD_EXECUTABLE)
+diff --git system/vold/AutoVolume.cpp system/vold/AutoVolume.cpp
+new file mode 100644
+index 0000000..f013d8e
+--- /dev/null
++++ system/vold/AutoVolume.cpp
+@@ -0,0 +1,126 @@
++/*
++ * Copyright (C) 2010 The Android-x86 Open Source Project
++ *
++ * Author: Chih-Wei Huang <cwhuang@linux.org.tw>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#define LOG_TAG "AutoVolume"
++
++#include <dirent.h>
++#include <stdlib.h>
++
++#include <cutils/log.h>
++#include <sysutils/NetlinkEvent.h>
++
++#include "Fat.h"
++#include "Loop.h"
++#include "AutoVolume.h"
++
++AutoVolume::AutoVolume(VolumeManager *vm, const char *label, const char *mount_point, const char *sdcard)
++          : DirectVolume(vm, label, mount_point, -1), mSdcard(0)
++{
++    if (sdcard && *sdcard) {
++        if (strncmp(sdcard, "/dev/", 5) && !access(sdcard, F_OK)) {
++            char loopdev[256];
++            if (!Loop::create(label, sdcard, loopdev, sizeof(loopdev)))
++                sdcard = loopdev;
++        } else if (!strcmp(sdcard, "ramdisk")) {
++            // FIXME: do not hardcode ramdisk device
++            const char *ramdisk = "/dev/block/ram1";
++            Fat::format(ramdisk, 0);
++            sdcard = ramdisk;
++        }
++        if (const char *d = strrchr(sdcard, '/'))
++            sdcard = ++d;
++        else if (!strcmp(sdcard, "premount"))
++            setState(State_Idle);
++        mSdcard = strdup(sdcard);
++    }
++}
++
++AutoVolume::~AutoVolume()
++{
++    free(mSdcard);
++}
++
++static bool isExternalStorage(const char *dir, const char *syspath)
++{
++    bool ret = false;
++    if (DIR *d = opendir(dir)) {
++        while (struct dirent *e = readdir(d)) {
++            char buf[256];
++            if (e->d_name[0] != '.' &&
++                    strcmp(e->d_name, "module") && strcmp(e->d_name, "uevent") &&
++                    strcmp(e->d_name, "unbind") && strcmp(e->d_name, "bind") &&
++                    strcmp(e->d_name, "new_id") && strcmp(e->d_name, "remove_id")) {
++                char p[256];
++                snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
++                ssize_t sz = readlink(p, buf, sizeof(buf));
++                // skip the beginning "../../../.."
++                if (sz > 11 && !strncmp(buf + 11, syspath, sz - 11)) {
++                    ret = true;
++                    break;
++                }
++            }
++        }
++        closedir(d);
++    }
++    return ret;
++}
++
++int AutoVolume::handleBlockEvent(NetlinkEvent *evt)
++{
++    if (evt->getAction() == NetlinkEvent::NlActionAdd) {
++        const char *dt = evt->findParam("DEVTYPE");
++        const char *dp = evt->findParam("DEVPATH");
++        bool isdisk = !strcmp(dt, "disk");
++        if (mSdcard) {
++            if (const char *d = strrchr(dp, '/')) {
++                int ret = strcmp(++d, mSdcard);
++                if (isdisk) {
++                    if (ret) {
++                        char p[256];
++                        snprintf(p, sizeof(p), "/sys%s/%s", dp, mSdcard);
++                        ret = access(p, F_OK);
++                    }
++                    if (!ret)
++                        addPath(dp);
++                } else {
++                    if (!ret) {
++                        const char *t = evt->findParam("PARTN");
++                        mPartIdx = t ? atoi(t) : 1;
++                    }
++                }
++            }
++        } else {
++            if (isdisk) {
++                const char *storages[] = {
++                    "/sys/bus/mmc/drivers/mmcblk",      // MMC block device
++                    "/sys/bus/usb/drivers/usb-storage", // USB Mass Storage
++                };
++
++                size_t i = 0;
++                while (i < sizeof(storages) / sizeof(const char *)) {
++                    if (isExternalStorage(storages[i++], dp)) {
++                        addPath(dp);
++                        break;
++                    }
++                }
++            }
++        }
++    }
++
++    return DirectVolume::handleBlockEvent(evt);
++}
+diff --git system/vold/AutoVolume.h system/vold/AutoVolume.h
+new file mode 100644
+index 0000000..830b035
+--- /dev/null
++++ system/vold/AutoVolume.h
+@@ -0,0 +1,35 @@
++/*
++ * Copyright (C) 2010 The Android-x86 Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef _AUTOVOLUME_H
++#define _AUTOVOLUME_H
++
++#include "DirectVolume.h"
++
++
++class AutoVolume : public DirectVolume {
++public:
++    AutoVolume(VolumeManager *vm, const char *label, const char *mount_point, const char *part_name = 0);
++    virtual ~AutoVolume();
++
++protected:
++    int handleBlockEvent(NetlinkEvent *evt);
++
++private:
++    char *mSdcard;
++};
++
++#endif
+diff --git system/vold/DirectVolume.cpp system/vold/DirectVolume.cpp
+index 1fe2ae4..c4a19e7 100644
+--- system/vold/DirectVolume.cpp
++++ system/vold/DirectVolume.cpp
+@@ -38,15 +38,12 @@ DirectVolume::DirectVolume(VolumeManager *vm, const char *label,
+     mPartIdx = partIdx;
+ 
+     mPaths = new PathCollection();
+-    for (int i = 0; i < MAX_PARTITIONS; i++) {
++    for (int i = 0; i < MAX_PARTITIONS; i++)
+         mPartMinors[i] = -1;
+-        mPartMajors[i] = -1;
+-    }
+-    mPendingPart = 0;
++    mPendingPartMap = 0;
+     mDiskMajor = -1;
+     mDiskMinor = -1;
+     mDiskNumParts = 0;
+-    emmcCard = false;
+ 
+     setState(Volume::State_NoMedia);
+ }
+@@ -68,7 +65,6 @@ dev_t DirectVolume::getDiskDevice() {
+     return MKDEV(mDiskMajor, mDiskMinor);
+ }
+ 
+-
+ dev_t DirectVolume::getShareDevice() {
+     if (mPartIdx != -1) {
+         return MKDEV(mDiskMajor, mPartIdx);
+@@ -77,15 +73,6 @@ dev_t DirectVolume::getShareDevice() {
+     }
+ }
+ 
+-dev_t DirectVolume::getDiskDeviceNode() {
+-
+-    if (emmcCard) {
+-        return MKDEV(mPartMajors[0], mPartMinors[0]);
+-    } else {
+-        return getShareDevice();
+-    }
+-}
+-
+ void DirectVolume::handleVolumeShared() {
+     setState(Volume::State_Shared);
+ }
+@@ -98,8 +85,6 @@ int DirectVolume::handleBlockEvent(NetlinkEvent *evt) {
+     const char *dp = evt->findParam("DEVPATH");
+ 
+     PathCollection::iterator  it;
+-    int minor = atoi(evt->findParam("MINOR"));
+-
+     for (it = mPaths->begin(); it != mPaths->end(); ++it) {
+         if (!strncmp(dp, *it, strlen(*it))) {
+             /* We can handle this disk */
+@@ -108,6 +93,7 @@ int DirectVolume::handleBlockEvent(NetlinkEvent *evt) {
+ 
+             if (action == NetlinkEvent::NlActionAdd) {
+                 int major = atoi(evt->findParam("MAJOR"));
++                int minor = atoi(evt->findParam("MINOR"));
+                 char nodepath[255];
+ 
+                 snprintf(nodepath,
+@@ -154,26 +140,17 @@ void DirectVolume::handleDiskAdded(const char *devpath, NetlinkEvent *evt) {
+         mDiskNumParts = atoi(tmp);
+     } else {
+         SLOGW("Kernel block uevent missing 'NPARTS'");
+-        mDiskNumParts = 1;
+-    }
+-
+-    if (mDiskNumParts > MAX_PARTITIONS) {
+-        mDiskNumParts = MAX_PARTITIONS;
+-    }
+-
+-    if (mDiskNumParts > 4)
+-        emmcCard = true;
+-    else
+-        emmcCard = false;
+-
+-    int partNumber = getOverrideSDPartition();
+-    if (partNumber > 0) {
+-        mDiskNumParts = 1;
++        mDiskNumParts = 0;
+     }
+ 
+     char msg[255];
+ 
+-    mPendingPart = mDiskNumParts;
++    int partmask = 0;
++    int i;
++    for (i = 1; i <= mDiskNumParts; i++) {
++        partmask |= (1 << i);
++    }
++    mPendingPartMap = partmask;
+ 
+     if (mDiskNumParts == 0) {
+ #ifdef PARTITION_DEBUG
+@@ -183,24 +160,22 @@ void DirectVolume::handleDiskAdded(const char *devpath, NetlinkEvent *evt) {
+     } else {
+ #ifdef PARTITION_DEBUG
+         SLOGD("Dv::diskIns - waiting for %d partitions (mask 0x%x)",
+-             mDiskNumParts, mPendingPart);
++             mDiskNumParts, mPendingPartMap);
+ #endif
+         setState(Volume::State_Pending);
+     }
+ 
+-    if (!emmcCard || (partNumber > 0 && emmcCard)) {
+-          snprintf(msg, sizeof(msg), "Volume %s %s disk inserted (%d:%d)",
+-                   getLabel(), getMountpoint(), mDiskMajor, mDiskMinor);
+-          mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeDiskInserted,
+-                                              msg, false);
+-    }
++    snprintf(msg, sizeof(msg), "Volume %s %s disk inserted (%d:%d)",
++             getLabel(), getMountpoint(), mDiskMajor, mDiskMinor);
++    mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeDiskInserted,
++                                             msg, false);
+ }
+ 
+ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) {
+     int major = atoi(evt->findParam("MAJOR"));
+     int minor = atoi(evt->findParam("MINOR"));
+ 
+-    int part_num, partitionNumber;
++    int part_num;
+ 
+     const char *tmp = evt->findParam("PARTN");
+ 
+@@ -208,32 +183,33 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt)
+         part_num = atoi(tmp);
+     } else {
+         SLOGW("Kernel block uevent missing 'PARTN'");
+-        part_num = 1;
++        part_num = ++mDiskNumParts;
+     }
+ 
+-    if (emmcCard) {
+-        partitionNumber = getOverrideSDPartition();
+-        if (partitionNumber != part_num) {
+-            return;
+-       }
++    if (part_num > MAX_PARTITIONS || part_num < 1) {
++        SLOGW("Invalid 'PARTN' value");
++        part_num = 1;
+     }
+-    if (part_num > MAX_PARTITIONS) {
+-        SLOGW("Current partition %d > 4 (Maximum partitions supported)", part_num);
+-        return;
++
++    if (part_num > mDiskNumParts) {
++        mDiskNumParts = part_num;
+     }
+ 
+     if (major != mDiskMajor) {
+-        SLOGI("Partition '%s' has a different major than its disk!", devpath);
++        SLOGE("Partition '%s' has a different major than its disk!", devpath);
++        return;
+     }
+ #ifdef PARTITION_DEBUG
+     SLOGD("Dv:partAdd: part_num = %d, minor = %d\n", part_num, minor);
+ #endif
+-    mPartMinors[mDiskNumParts - mPendingPart] = minor;
+-    mPartMajors[mDiskNumParts - mPendingPart] = major;
+-
+-    if(mPendingPart > 0) mPendingPart--;
++    if (part_num > MAX_PARTITIONS) {
++        SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d)\n", part_num, MAX_PARTITIONS);
++    } else {
++        mPartMinors[part_num -1] = minor;
++    }
++    mPendingPartMap &= ~(1 << part_num);
+ 
+-    if (mPendingPart == 0) {
++    if (!mPendingPartMap) {
+ #ifdef PARTITION_DEBUG
+         SLOGD("Dv:partAdd: Got all partitions - ready to rock!");
+ #endif
+@@ -242,7 +218,7 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt)
+         }
+     } else {
+ #ifdef PARTITION_DEBUG
+-        SLOGD("Dv:partAdd: pending mask now = 0x%x", mPendingPart);
++        SLOGD("Dv:partAdd: pending mask now = 0x%x", mPendingPartMap);
+ #endif
+     }
+ }
+@@ -261,15 +237,16 @@ void DirectVolume::handleDiskChanged(const char *devpath, NetlinkEvent *evt) {
+         mDiskNumParts = atoi(tmp);
+     } else {
+         SLOGW("Kernel block uevent missing 'NPARTS'");
+-        mDiskNumParts = 1;
++        mDiskNumParts = 0;
+     }
+-    if (mDiskNumParts == 0)  mDiskNumParts = 1;
+ 
+-    if (mDiskNumParts > MAX_PARTITIONS) {
+-        mDiskNumParts = MAX_PARTITIONS;
++    int partmask = 0;
++    int i;
++    for (i = 1; i <= mDiskNumParts; i++) {
++        partmask |= (1 << i);
+     }
++    mPendingPartMap = partmask;
+ 
+-    mPendingPart =  mDiskNumParts;
+     if (getState() != Volume::State_Formatting) {
+         if (mDiskNumParts == 0) {
+             setState(Volume::State_Idle);
+@@ -302,6 +279,7 @@ void DirectVolume::handlePartitionRemoved(const char *devpath, NetlinkEvent *evt
+     int major = atoi(evt->findParam("MAJOR"));
+     int minor = atoi(evt->findParam("MINOR"));
+     char msg[255];
++    int state;
+ 
+     SLOGD("Volume %s %s partition %d:%d removed\n", getLabel(), getMountpoint(), major, minor);
+ 
+@@ -311,7 +289,8 @@ void DirectVolume::handlePartitionRemoved(const char *devpath, NetlinkEvent *evt
+      * the removal notification will be sent on the Disk
+      * itself
+      */
+-    if (getState() != Volume::State_Mounted) {
++    state = getState();
++    if (state != Volume::State_Mounted && state != Volume::State_Shared) {
+         return;
+     }
+         
+@@ -336,6 +315,19 @@ void DirectVolume::handlePartitionRemoved(const char *devpath, NetlinkEvent *evt
+         } else {
+             SLOGD("Crisis averted");
+         }
++    } else if (state == Volume::State_Shared) {
++        /* removed during mass storage */
++        snprintf(msg, sizeof(msg), "Volume %s bad removal (%d:%d)",
++                 getLabel(), major, minor);
++        mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeBadRemoval,
++                                             msg, false);
++
++        if (mVm->unshareVolume(getLabel(), "ums")) {
++            SLOGE("Failed to unshare volume on bad removal (%s)",
++                strerror(errno));
++        } else {
++            SLOGD("Crisis averted");
++        }
+     }
+ }
+ 
+@@ -355,10 +347,10 @@ int DirectVolume::getDeviceNodes(dev_t *devs, int max) {
+         for (i = 0; i < mDiskNumParts; i++) {
+             if (i == max)
+                 break;
+-            devs[i] = MKDEV(mPartMajors[i], mPartMinors[i]);
++            devs[i] = MKDEV(mDiskMajor, mPartMinors[i]);
+         }
+         return mDiskNumParts;
+     }
+-    devs[0] = MKDEV(mPartMajors[mPartIdx -1], mPartMinors[mPartIdx -1]);
++    devs[0] = MKDEV(mDiskMajor, mPartMinors[mPartIdx -1]);
+     return 1;
+ }
+diff --git system/vold/DirectVolume.h system/vold/DirectVolume.h
+index 0c051e4..65adb60 100644
+--- system/vold/DirectVolume.h
++++ system/vold/DirectVolume.h
+@@ -21,22 +21,23 @@
+ 
+ #include "Volume.h"
+ 
+-#define MAX_PARTS 4
++#ifndef VOLD_MAX_PARTITIONS
++#define VOLD_MAX_PARTITIONS 4
++#endif
+ 
+ typedef android::List<char *> PathCollection;
+ 
+ class DirectVolume : public Volume {
+ public:
+-    static const int MAX_PARTITIONS = 16;
++    static const int MAX_PARTITIONS = VOLD_MAX_PARTITIONS;
++
+ protected:
+     PathCollection *mPaths;
+     int            mDiskMajor;
+     int            mDiskMinor;
+     int            mPartMinors[MAX_PARTITIONS];
+-    int            mPartMajors[MAX_PARTITIONS];
+     int            mDiskNumParts;
+-    unsigned char  mPendingPart;
+-    bool           emmcCard;
++    unsigned char  mPendingPartMap;
+ 
+ public:
+     DirectVolume(VolumeManager *vm, const char *label, const char *mount_point, int partIdx);
+@@ -47,10 +48,8 @@ public:
+     int handleBlockEvent(NetlinkEvent *evt);
+     dev_t getDiskDevice();
+     dev_t getShareDevice();
+-    dev_t getDiskDeviceNode();
+     void handleVolumeShared();
+     void handleVolumeUnshared();
+-    bool getEmmcCardVal() { return emmcCard; }
+ 
+ protected:
+     int getDeviceNodes(dev_t *devs, int max);
+diff --git system/vold/Fat.cpp system/vold/Fat.cpp
+index db43f6e..cbbc8c2 100644
+--- system/vold/Fat.cpp
++++ system/vold/Fat.cpp
+@@ -39,13 +39,14 @@
+ #include "Fat.h"
+ 
+ static char FSCK_MSDOS_PATH[] = "/system/bin/fsck_msdos";
++static char FSCK_EXT_PATH[] = "/system/bin/e2fsck";
+ static char MKDOSFS_PATH[] = "/system/bin/newfs_msdos";
+ extern "C" int logwrap(int argc, const char **argv, int background);
+ extern "C" int mount(const char *, const char *, const char *, unsigned long, const void *);
+ 
+ int Fat::check(const char *fsPath) {
+     bool rw = true;
+-    if (access(FSCK_MSDOS_PATH, X_OK)) {
++    if (access(FSCK_MSDOS_PATH, X_OK) || access(FSCK_EXT_PATH, X_OK)) {
+         SLOGW("Skipping fs checks\n");
+         return 0;
+     }
+@@ -60,19 +61,61 @@ int Fat::check(const char *fsPath) {
+         args[3] = fsPath;
+         args[4] = NULL;
+ 
++        enum { FS_OK, FS_FIXED, FS_MISMATCH, FS_ERROR } status = FS_ERROR;
++
+         rc = logwrap(4, args, 1);
++        if (rc == 0) {
++            // if rc is 0, the check was ok
++            // That means the FileSystem is FAT
++            fsType = 1;
++            status = FS_OK;
++        } else if (rc == 2)
++            status = FS_MISMATCH;
++        else if (rc == 4)
++            status = FS_FIXED;
++        else
++            status = FS_ERROR;
++
++        if (status == FS_MISMATCH) { // not FAT, let's try EXT
++            args[0] = FSCK_EXT_PATH;
++            args[1] = "-p";
++            args[2] = "-f";
++            args[3] = fsPath;
++            args[4] = NULL;
++            rc = logwrap(4, args, 1);
++            if (rc == 0) {
++                // if rc is 0, the check was ok
++                // That means the FileSystem is EXT
++                fsType = 2;
++                status = FS_OK;
++            } else if (rc == 1)
++                status = FS_FIXED;
++            else if (rc == 8)
++                status = FS_MISMATCH;
++            else
++                status = FS_ERROR;
++        }
+ 
+-        switch(rc) {
+-        case 0:
++        switch(status) {
++        case FS_OK:
+             SLOGI("Filesystem check completed OK");
++            // TODO: Remove this print.
++            const char *fsTypePrint;
++            if (fsType == 1)
++                fsTypePrint = "VFAT";
++            else if (fsType == 2)
++                fsTypePrint = "EXT";
++            else
++                fsTypePrint = "Unknown";
++            SLOGI("Filesystem type is: %s", fsTypePrint);
+             return 0;
+ 
+-        case 2:
+-            SLOGE("Filesystem check failed (not a FAT filesystem)");
++        case FS_MISMATCH:
++            SLOGW("Filesystem check failed (not a FAT or EXT filesystem)");
+             errno = ENODATA;
+             return -1;
+ 
+-        case 4:
++        case FS_FIXED:
+             if (pass++ <= 3) {
+                 SLOGW("Filesystem modified - rechecking (pass %d)",
+                         pass);
+@@ -98,6 +141,7 @@ int Fat::doMount(const char *fsPath, const char *mountPoint,
+     int rc;
+     unsigned long flags;
+     char mountData[255];
++    const char *mntFSType;
+ 
+     flags = MS_NODEV | MS_NOSUID | MS_DIRSYNC;
+ 
+@@ -119,23 +163,27 @@ int Fat::doMount(const char *fsPath, const char *mountPoint,
+         permMask = 0;
+     }
+ 
+-    sprintf(mountData,
+-            "utf8,uid=%d,gid=%d,fmask=%o,dmask=%o,shortname=mixed",
+-            ownerUid, ownerGid, permMask, permMask);
++    if (fsType == 2) {
++        sprintf(mountData, "noauto_da_alloc");
++        mntFSType = "ext4";
++    } else {
++        sprintf(mountData,
++                "utf8,uid=%d,gid=%d,fmask=%o,dmask=%o,shortname=mixed",
++                ownerUid, ownerGid, permMask, permMask);
++        mntFSType = "vfat";
++    }
+ 
+-    rc = mount(fsPath, mountPoint, "vfat", flags, mountData);
++    rc = mount(fsPath, mountPoint, mntFSType, flags, mountData);
+ 
+     if (rc && errno == EROFS) {
+         SLOGE("%s appears to be a read only filesystem - retrying mount RO", fsPath);
+         flags |= MS_RDONLY;
+-        rc = mount(fsPath, mountPoint, "vfat", flags, mountData);
++        rc = mount(fsPath, mountPoint, mntFSType, flags, mountData);
+     }
+ 
+-    if (rc == 0 && createLost) {
++    if (rc == 0 && createLost && fsType == 1) {
+         char *lost_path;
+-        char *download_path;
+         asprintf(&lost_path, "%s/LOST.DIR", mountPoint);
+-        asprintf(&download_path, "%s/Download", mountPoint);
+         if (access(lost_path, F_OK)) {
+             /*
+              * Create a LOST.DIR in the root so we have somewhere to put
+@@ -145,17 +193,7 @@ int Fat::doMount(const char *fsPath, const char *mountPoint,
+                 SLOGE("Unable to create LOST.DIR (%s)", strerror(errno));
+             }
+         }
+-        if (access(download_path, F_OK)) {
+-            /*
+-             * Create a Download directory in the root so we have somewhere to put
+-             * downloaded data.
+-             */
+-            if (mkdir(download_path, 0755)) {
+-                SLOGE("Unable to create Download directory (%s)", strerror(errno));
+-            }
+-        }
+         free(lost_path);
+-        free(download_path);
+     }
+ 
+     return rc;
+@@ -165,49 +203,28 @@ int Fat::format(const char *fsPath, unsigned int numSectors) {
+     int fd;
+     const char *args[11];
+     int rc;
+-    unsigned int nr_sec, Indx;
+ 
+     args[0] = MKDOSFS_PATH;
+     args[1] = "-F";
+     args[2] = "32";
+     args[3] = "-O";
+     args[4] = "android";
+-    Indx = 5;
+-
+-    if (numSectors) {
+-        nr_sec = numSectors;
+-    } else {
+-        if ((fd = open(fsPath, O_RDWR)) < 0) {
+-            LOGE("Error opening disk file (%s)", strerror(errno));
+-            return -1;
+-        }
+-        if (ioctl(fd, BLKGETSIZE, &nr_sec)) {
+-            LOGE("Unable to get device size (%s)", strerror(errno));
+-            close(fd);
+-            return -1;
+-        }
+-        close(fd);
+-
+-    }
+-    if ((nr_sec/2) <= ((unsigned int) (1024*1024) * 2)) {    /* 2GB  */
+-            args[Indx++] = "-c";
+-            args[Indx++] = "8";
+-
+-    }
++    args[5] = "-c";
++    args[6] = "8";
+ 
+     if (numSectors) {
+         char tmp[32];
+         snprintf(tmp, sizeof(tmp), "%u", numSectors);
+         const char *size = tmp;
+-        args[Indx++] = "-s";
+-        args[Indx++] = size;
+-        args[Indx++] = fsPath;
+-        args[Indx++] = NULL;
+-        rc = logwrap(Indx, args, 1);
++        args[7] = "-s";
++        args[8] = size;
++        args[9] = fsPath;
++        args[10] = NULL;
++        rc = logwrap(11, args, 1);
+     } else {
+-        args[Indx++] = fsPath;
+-        args[Indx++] = NULL;
+-        rc = logwrap(Indx, args, 1);
++        args[7] = fsPath;
++        args[8] = NULL;
++        rc = logwrap(9, args, 1);
+     }
+ 
+     if (rc == 0) {
+diff --git system/vold/Fat.h system/vold/Fat.h
+index e02d88c..9bab8d9 100644
+--- system/vold/Fat.h
++++ system/vold/Fat.h
+@@ -19,6 +19,8 @@
+ 
+ #include <unistd.h>
+ 
++static int fsType;
++
+ class Fat {
+ public:
+     static int check(const char *fsPath);
+diff --git system/vold/NetlinkHandler.cpp system/vold/NetlinkHandler.cpp
+index f47d364..bd2eaf6 100644
+--- system/vold/NetlinkHandler.cpp
++++ system/vold/NetlinkHandler.cpp
+@@ -54,8 +54,10 @@ void NetlinkHandler::onEvent(NetlinkEvent *evt) {
+         vm->handleBlockEvent(evt);
+     } else if (!strcmp(subsys, "switch")) {
+         vm->handleSwitchEvent(evt);
++#ifndef USE_USB_MASS_STORAGE_SWITCH
+     } else if (!strcmp(subsys, "usb_composite")) {
+         vm->handleUsbCompositeEvent(evt);
++#endif
+     } else if (!strcmp(subsys, "battery")) {
+     } else if (!strcmp(subsys, "power_supply")) {
+     }
+diff --git system/vold/Ntfs.cpp system/vold/Ntfs.cpp
+new file mode 100644
+index 0000000..d5e9772
+--- /dev/null
++++ system/vold/Ntfs.cpp
+@@ -0,0 +1,103 @@
++/*
++ * Copyright (C) 2008 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <stdio.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <errno.h>
++#include <string.h>
++#include <dirent.h>
++#include <errno.h>
++#include <fcntl.h>
++
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <sys/mman.h>
++#include <sys/mount.h>
++
++#include <linux/kdev_t.h>
++
++#define LOG_TAG "Vold"
++
++#include <cutils/log.h>
++#include <cutils/properties.h>
++
++#include "Ntfs.h"
++
++extern "C" int logwrap(int argc, const char **argv, int background);
++extern "C" int mount(const char *, const char *, const char *, unsigned long, const void *);
++
++int Ntfs::check(const char *fsPath) {
++  
++    // no NTFS file system check is performed, always return true
++    SLOGI("Ntfs filesystem: Skipping fs checks\n");
++    return 0;
++
++}
++
++int Ntfs::doMount(const char *fsPath, const char *mountPoint,
++                 bool ro, bool remount, bool executable,
++                 int ownerUid, int ownerGid, int permMask, bool createLost) {
++    int rc;
++    unsigned long flags;
++    char mountData[255];
++
++    flags = MS_NODEV | MS_NOSUID | MS_DIRSYNC;
++
++    flags |= (executable ? 0 : MS_NOEXEC);
++    flags |= (ro ? MS_RDONLY : 0);
++    flags |= (remount ? MS_REMOUNT : 0);
++
++    // Testing/security, mount ro up to now
++    flags |= MS_RDONLY;
++    
++    /*
++     * Note: This is a temporary hack. If the sampling profiler is enabled,
++     * we make the SD card world-writable so any process can write snapshots.
++     *
++     * TODO: Remove this code once we have a drop box in system_server.
++     */
++    char value[PROPERTY_VALUE_MAX];
++    property_get("persist.sampling_profiler", value, "");
++    if (value[0] == '1') {
++        SLOGW("The SD card is world-writable because the"
++            " 'persist.sampling_profiler' system property is set to '1'.");
++        permMask = 0;
++    }
++
++    sprintf(mountData,
++            "uid=%d,gid=%d,fmask=%o,dmask=%o",
++            ownerUid, ownerGid, permMask, permMask);
++
++    rc = mount(fsPath, mountPoint, "ntfs", flags, mountData);
++
++    if (rc && errno == EROFS) {
++        SLOGE("%s appears to be a read only filesystem - retrying mount RO", fsPath);
++        flags |= MS_RDONLY;
++        rc = mount(fsPath, mountPoint, "ntfs", flags, mountData);
++    }
++
++    return rc;
++}
++
++int Ntfs::format(const char *fsPath, unsigned int numSectors) {
++    
++    SLOGE("Format ntfs filesystem not supported\n");
++    errno = EIO;
++    return -1;
++
++}
+diff --git system/vold/Ntfs.h system/vold/Ntfs.h
+new file mode 100644
+index 0000000..8cc36de
+--- /dev/null
++++ system/vold/Ntfs.h
+@@ -0,0 +1,32 @@
++/*
++ * Copyright (C) 2008 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef _NTFS_H
++#define _NTFS_H
++
++#include <unistd.h>
++
++class Ntfs {
++public:
++    static int check(const char *fsPath);
++    static int doMount(const char *fsPath, const char *mountPoint,
++                       bool ro, bool remount, bool executable,
++                       int ownerUid, int ownerGid, int permMask,
++                       bool createLost);
++    static int format(const char *fsPath, unsigned int numSectors);
++};
++
++#endif
+diff --git system/vold/Volume.cpp system/vold/Volume.cpp
+index a9488f5..e87553f 100644
+--- system/vold/Volume.cpp
++++ system/vold/Volume.cpp
+@@ -19,6 +19,7 @@
+ #include <dirent.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#include <unistd.h>
+ 
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -40,6 +41,7 @@
+ #include "VolumeManager.h"
+ #include "ResponseCode.h"
+ #include "Fat.h"
++#include "Ntfs.h"
+ #include "Process.h"
+ 
+ extern "C" void dos_partition_dec(void const *pp, struct dos_partition *d);
+@@ -104,6 +106,7 @@ static const char *stateToStr(int state) {
+ }
+ 
+ Volume::Volume(VolumeManager *vm, const char *label, const char *mount_point) {
++    char switchable[PROPERTY_VALUE_MAX];
+     mVm = vm;
+     mDebug = false;
+     mLabel = strdup(label);
+@@ -111,7 +114,29 @@ Volume::Volume(VolumeManager *vm, const char *label, const char *mount_point) {
+     mState = Volume::State_Init;
+     mCurrentlyMountedKdev = -1;
+     mPartIdx = -1;
+-    mPartitionNumber = 0;
++
++    property_get("persist.sys.vold.switchexternal", switchable, "0");
++    if (!strcmp(switchable,"1")) {
++        char *first, *second = NULL;
++        const char *delim = ",";
++
++        property_get("ro.vold.switchablepair", switchable, "");
++
++        if (!(first = strtok(switchable, delim))) {
++            SLOGE("Mount switch requested, but no switchable mountpoints found");
++            return;
++        } else if (!(second = strtok(NULL, delim))) {
++            SLOGE("Mount switch requested, but bad switchable mountpoints found");
++            return;
++        }
++        if (!strcmp(mount_point,first)) {
++                free(mMountpoint);
++                mMountpoint = strdup(second);
++        } else if (!strcmp(mount_point,second)) {
++                free(mMountpoint);
++                mMountpoint = strdup(first);
++        }
++    }
+ }
+ 
+ Volume::~Volume() {
+@@ -150,10 +175,6 @@ dev_t Volume::getShareDevice() {
+     return getDiskDevice();
+ }
+ 
+-dev_t Volume::getDiskDeviceNode() {
+-    return MKDEV(0, 0);
+-};
+-
+ void Volume::handleVolumeShared() {
+ }
+ 
+@@ -187,10 +208,6 @@ void Volume::setState(int state) {
+                                          msg, false);
+ }
+ 
+-void Volume::setOverrideSDPartition(int partitionNumber) {
+-     mPartitionNumber = partitionNumber;
+-}
+-
+ int Volume::createDeviceNode(const char *path, int major, int minor) {
+     mode_t mode = 0660 | S_IFBLK;
+     dev_t dev = (major << 8) | minor;
+@@ -223,31 +240,34 @@ int Volume::formatVol() {
+     bool formatEntireDevice = (mPartIdx == -1);
+     char devicePath[255];
+     dev_t diskNode = getDiskDevice();
+-    dev_t partNode = MKDEV(MAJOR(diskNode), MINOR(diskNode)+1);
++    dev_t partNode = MKDEV(MAJOR(diskNode), (formatEntireDevice ? 1 : mPartIdx));
+ 
+     setState(Volume::State_Formatting);
+ 
+-    int partNumber = getOverrideSDPartition();
+-    if (partNumber > 0) {
+-        dev_t d =  getDiskDeviceNode();
+-        partNode = MKDEV(MAJOR(d), MINOR(d));
+-    } else {
+-
++    int ret = -1;
+     // Only initialize the MBR if we are formatting the entire device
+-        if (formatEntireDevice) {
+-            sprintf(devicePath, "/dev/block/vold/%d:%d",
++    if (formatEntireDevice) {
++        sprintf(devicePath, "/dev/block/vold/%d:%d",
+                 MAJOR(diskNode), MINOR(diskNode));
+-            if (initializeMbr(devicePath)) {
+-                SLOGE("Failed to initialize MBR (%s)", strerror(errno));
+-                goto err;
+-            }
++
++        if (initializeMbr(devicePath)) {
++            SLOGE("Failed to initialize MBR (%s)", strerror(errno));
++            goto err;
+         }
+-        partNode = MKDEV(MAJOR(diskNode), MINOR(diskNode)+1);
+     }
+ 
+     sprintf(devicePath, "/dev/block/vold/%d:%d",
+             MAJOR(partNode), MINOR(partNode));
+ 
++#ifdef VOLD_EMMC_SHARES_DEV_MAJOR
++    // If emmc and sdcard share dev major number, vold may pick
++    // incorrectly based on partition nodes alone, formatting
++    // the wrong device. Use device nodes instead.
++    dev_t deviceNodes;
++    getDeviceNodes((dev_t *) &deviceNodes, 1);
++    sprintf(devicePath, "/dev/block/vold/%d:%d", MAJOR(deviceNodes), MINOR(deviceNodes));
++#endif
++
+     if (mDebug) {
+         SLOGI("Formatting volume %s (%s)", getLabel(), devicePath);
+     }
+@@ -257,11 +277,11 @@ int Volume::formatVol() {
+         goto err;
+     }
+ 
+-    setState(Volume::State_Idle);
+-    return 0;
++    ret = 0;
++
+ err:
+     setState(Volume::State_Idle);
+-    return -1;
++    return ret;
+ }
+ 
+ bool Volume::isMountpointMounted(const char *path) {
+@@ -333,16 +353,46 @@ int Volume::mountVol() {
+         errno = 0;
+         setState(Volume::State_Checking);
+ 
++        bool isFatFs = true;
+         if (Fat::check(devicePath)) {
+             if (errno == ENODATA) {
+-                SLOGW("%s does not contain a FAT filesystem\n", devicePath);
+-                continue;
++                SLOGW("%s does not contain a FAT or EXT4 filesystem\n", devicePath);
++                isFatFs = false;
++            } else {
++                errno = EIO;
++                /* Badness - abort the mount */
++                SLOGE("%s failed FS checks (%s)", devicePath, strerror(errno));
++                setState(Volume::State_Idle);
++                return -1;
+             }
+-            errno = EIO;
+-            /* Badness - abort the mount */
+-            SLOGE("%s failed FS checks (%s)", devicePath, strerror(errno));
+-            setState(Volume::State_Idle);
+-            return -1;
++        }
++
++        if (access(getMountpoint(), F_OK)) {
++            char *myMountpoint = strdup(getMountpoint());
++            if (!myMountpoint) {
++                SLOGE("Allocation failure while mounting %s", devicePath);
++                return -1;
++            }
++            if (*myMountpoint) {
++                if (mDebug) SLOGD("Mount point prepare for \"%s\"", myMountpoint);
++                char *slash = myMountpoint;
++                while (slash) {
++                    slash = strchr(slash + 1, '/');
++                    if (slash)
++                        *slash = 0;
++                    if (mDebug) SLOGD("Check existence of %s", myMountpoint);
++                    if (access(myMountpoint, F_OK)) {
++                        if (mDebug) SLOGD("Create %s", myMountpoint);
++                        if (mkdir(myMountpoint, 0555)) {
++                            SLOGE("Failed to create %s", myMountpoint);
++                            return -1;
++                        }
++                    }
++                    if (slash)
++                        *slash = '/';
++                }
++            }
++            free (myMountpoint);
+         }
+ 
+         /*
+@@ -350,17 +400,29 @@ int Volume::mountVol() {
+          * muck with it before exposing it to non priviledged users.
+          */
+         errno = 0;
+-        if (Fat::doMount(devicePath, "/mnt/secure/staging", false, false, false,
+-                1000, 1015, 0702, true)) {
+-            SLOGE("%s failed to mount via VFAT (%s)\n", devicePath, strerror(errno));
+-            continue;
++        if ( isFatFs ) {
++            if (Fat::doMount(devicePath, "/mnt/secure/staging", false, false, false,
++                    1000, 1015, 0602, true)) {
++                SLOGE("%s failed to mount (%s)\n", devicePath, strerror(errno));
++                continue;
++            }
++        } else {
++            if (Ntfs::doMount(devicePath, "/mnt/secure/staging", false, false, false,
++                    1000, 1015, 0602, true)) {
++                SLOGE("%s failed to mount via NTFS (%s)\n", devicePath, strerror(errno));
++                continue;
++            }
+         }
+ 
+         SLOGI("Device %s, target %s mounted @ /mnt/secure/staging", devicePath, getMountpoint());
+ 
+         protectFromAutorunStupidity();
+ 
+-        if (createBindMounts()) {
++        /* There can be only one SEC_ASECDIR, so let it be EXTERNAL_STORAGE */
++        const char *externalPath = getenv("EXTERNAL_STORAGE") ?: "/mnt/sdcard";
++        if (0 != strcmp(getMountpoint(), externalPath)) {
++            SLOGI("Skipping bindmounts for alternate volume (%s)", getMountpoint());
++        } else if (createBindMounts()) {
+             SLOGE("Failed to create bindmounts (%s)", strerror(errno));
+             umount("/mnt/secure/staging");
+             setState(Volume::State_Idle);
+@@ -486,7 +548,7 @@ int Volume::doMoveMount(const char *src, const char *dst, bool force) {
+ }
+ 
+ int Volume::doUnmount(const char *path, bool force) {
+-    int retries = 20;
++    int retries = 10;
+ 
+     if (mDebug) {
+         SLOGD("Unmounting {%s}, force = %d", path, force);
+@@ -514,10 +576,6 @@ int Volume::doUnmount(const char *path, bool force) {
+         Process::killProcessesWithOpenFiles(path, action);
+         usleep(1000*1000);
+     }
+-    if (!umount(path) || errno == EINVAL || errno == ENOENT) {
+-        SLOGI("%s sucessfully unmounted", path);
+-        return 0;
+-    }
+     errno = EBUSY;
+     SLOGE("Giving up on unmount %s (%s)", path, strerror(errno));
+     return -1;
+@@ -547,24 +605,28 @@ int Volume::unmountVol(bool force) {
+ 
+     protectFromAutorunStupidity();
+ 
+-    /*
+-     * Unmount the tmpfs which was obscuring the asec image directory
+-     * from non root users
+-     */
++    /* Undo createBindMounts(), which is only called for EXTERNAL_STORAGE */
++    const char *externalPath = getenv("EXTERNAL_STORAGE") ?: "/mnt/sdcard";
++    if (0 == strcmp(getMountpoint(), externalPath)) {
++        /*
++         * Unmount the tmpfs which was obscuring the asec image directory
++         * from non root users
++         */
+ 
+-    if (doUnmount(Volume::SEC_STG_SECIMGDIR, force)) {
+-        SLOGE("Failed to unmount tmpfs on %s (%s)", SEC_STG_SECIMGDIR, strerror(errno));
+-        goto fail_republish;
+-    }
++        if (doUnmount(Volume::SEC_STG_SECIMGDIR, force)) {
++            SLOGE("Failed to unmount tmpfs on %s (%s)", SEC_STG_SECIMGDIR, strerror(errno));
++            goto fail_republish;
++        }
+ 
+-    /*
+-     * Remove the bindmount we were using to keep a reference to
+-     * the previously obscured directory.
+-     */
++        /*
++         * Remove the bindmount we were using to keep a reference to
++         * the previously obscured directory.
++         */
+ 
+-    if (doUnmount(Volume::SEC_ASECDIR, force)) {
+-        SLOGE("Failed to remove bindmount on %s (%s)", SEC_ASECDIR, strerror(errno));
+-        goto fail_remount_tmpfs;
++        if (doUnmount(Volume::SEC_ASECDIR, force)) {
++            SLOGE("Failed to remove bindmount on %s (%s)", SEC_ASECDIR, strerror(errno));
++            goto fail_remount_tmpfs;
++        }
+     }
+ 
+     /*
+diff --git system/vold/Volume.h system/vold/Volume.h
+index bd250bd..1716b64 100644
+--- system/vold/Volume.h
++++ system/vold/Volume.h
+@@ -18,6 +18,7 @@
+ #define _VOLUME_H
+ 
+ #include <utils/List.h>
++#include <string.h>
+ 
+ class NetlinkEvent;
+ class VolumeManager;
+@@ -52,7 +53,6 @@ protected:
+     VolumeManager *mVm;
+     bool mDebug;
+     int mPartIdx;
+-    int mPartitionNumber;
+ 
+     /*
+      * The major/minor tuple of the currently mounted filesystem.
+@@ -69,25 +69,28 @@ public:
+ 
+     const char *getLabel() { return mLabel; }
+     const char *getMountpoint() { return mMountpoint; }
++    bool isPrefixOf(Volume *v) {
++        const char *myMountpoint = getMountpoint();
++        const char *oMountpoint = v->getMountpoint();
++        int myLen = strlen(myMountpoint);
++        return !strncmp(myMountpoint, oMountpoint, myLen) && (myMountpoint[myLen-1] == '/' || oMountpoint[myLen] == '/');
++    }
++
+     int getState() { return mState; }
+ 
+-    int getOverrideSDPartition() { return getEmmcCardVal() ? mPartitionNumber : 0; }
+-    void setOverrideSDPartition(int partitionNumber);
+     virtual int handleBlockEvent(NetlinkEvent *evt);
+     virtual dev_t getDiskDevice();
+     virtual dev_t getShareDevice();
+     virtual void handleVolumeShared();
+     virtual void handleVolumeUnshared();
+-    virtual dev_t getDiskDeviceNode();
+ 
+     void setDebug(bool enable);
+ 
++    virtual int getDeviceNodes(dev_t *devs, int max) = 0;
++
+ protected:
+     void setState(int state);
+ 
+-    virtual bool getEmmcCardVal() = 0;
+-    virtual int getDeviceNodes(dev_t *devs, int max) = 0;
+-
+     int createDeviceNode(const char *path, int major, int minor);
+ 
+ private:
+diff --git system/vold/VolumeManager.cpp system/vold/VolumeManager.cpp
+index 3c4aa0b..f9b5d9d 100644
+--- system/vold/VolumeManager.cpp
++++ system/vold/VolumeManager.cpp
+@@ -25,6 +25,8 @@
+ 
+ #include <linux/kdev_t.h>
+ 
++#include <cutils/properties.h>
++
+ #define LOG_TAG "Vold"
+ 
+ #include <openssl/md5.h>
+@@ -55,13 +57,19 @@ VolumeManager::VolumeManager() {
+     mVolumes = new VolumeCollection();
+     mActiveContainers = new AsecIdCollection();
+     mBroadcaster = NULL;
+-    mUsbMassStorageEnabled = false;
+-    mUsbConnected = false;
+     mUmsSharingCount = 0;
+     mSavedDirtyRatio = -1;
+     // set dirty ratio to 0 when UMS is active
+-    mUmsDirtyRatio = 0;
++    char dirtyratio[PROPERTY_VALUE_MAX];
++    property_get("ro.vold.umsdirtyratio", dirtyratio, "0");
++    mUmsDirtyRatio = atoi(dirtyratio);
++
+ 
++#ifdef USE_USB_MASS_STORAGE_SWITCH
++    mUsbMassStorageConnected = false;
++#else
++    mUsbConnected = false;
++    mUsbMassStorageEnabled = false;
+     readInitialState();
+ }
+ 
+@@ -96,6 +104,7 @@ void VolumeManager::readInitialState() {
+     } else {
+         SLOGD("usb_configuration switch is not enabled in the kernel");
+     }
++#endif
+ }
+ 
+ VolumeManager::~VolumeManager() {
+@@ -152,16 +161,43 @@ int VolumeManager::stop() {
+ }
+ 
+ int VolumeManager::addVolume(Volume *v) {
+-    mVolumes->push_back(v);
++    VolumeCollection::iterator it;
++    int myLen = strlen(v->getMountpoint());
++    for (it = mVolumes->begin(); it != mVolumes->end(); ++it) {
++	    if (strlen((*it)->getMountpoint()) >= myLen)
++            break;
++    }
++    mVolumes->insert(it, v);
++    if (mDebug) {
++        SLOGD("VolumeManager::addVolume completed");
++        SLOGD("VOLUMES DUMP BEGIN");
++        for (it = mVolumes->begin(); it != mVolumes->end(); ++it)
++            SLOGD("%c%s", *it == v ? '*' : ' ', (*it)->getMountpoint());
++        SLOGD("VOLUMES DUMP END");
++    }
+     return 0;
+ }
+ 
++#ifdef USE_USB_MASS_STORAGE_SWITCH
++void VolumeManager::notifyUmsConnected(bool connected) {
++#else
+ void VolumeManager::notifyUmsAvailable(bool available) {
++#endif
+     char msg[255];
+ 
++#ifdef USE_USB_MASS_STORAGE_SWITCH
++    if (connected) {
++        mUsbMassStorageConnected = true;
++    } else {
++        mUsbMassStorageConnected = false;
++    }
++    snprintf(msg, sizeof(msg), "Share method ums now %s",
++             (connected ? "available" : "unavailable"));
++#else
+     snprintf(msg, sizeof(msg), "Share method ums now %s",
+              (available ? "available" : "unavailable"));
+     SLOGD(msg);
++#endif
+     getBroadcaster()->sendBroadcast(ResponseCode::ShareAvailabilityChange,
+                                     msg, false);
+ }
+@@ -176,6 +212,13 @@ void VolumeManager::handleSwitchEvent(NetlinkEvent *evt) {
+         return;
+     }
+ 
++#ifdef USE_USB_MASS_STORAGE_SWITCH
++    if (!strcmp(name, "usb_mass_storage")) {
++        if (!strcmp(state, "online"))  {
++            notifyUmsConnected(true);
++        } else {
++            notifyUmsConnected(false);
++#else
+     bool oldAvailable = massStorageAvailable();
+     if (!strcmp(name, "usb_configuration")) {
+         mUsbConnected = !strcmp(state, "1");
+@@ -184,10 +227,19 @@ void VolumeManager::handleSwitchEvent(NetlinkEvent *evt) {
+         if (newAvailable != oldAvailable) {
+             notifyUmsAvailable(newAvailable);
+         }
++    } else if (!strcmp(name, "usb_connected")) {
++        mUsbConnected = !strcmp(state, "1");
++        SLOGD("USB %s", mUsbConnected ? "connected" : "disconnected");
++        bool newAvailable = massStorageAvailable();
++        if (newAvailable != oldAvailable) {
++            notifyUmsAvailable(newAvailable);
++#endif
++        }
+     } else {
+         SLOGW("Ignoring unknown switch '%s'", name);
+     }
+ }
++#ifndef USE_USB_MASS_STORAGE_SWITCH
+ void VolumeManager::handleUsbCompositeEvent(NetlinkEvent *evt) {
+     const char *function = evt->findParam("FUNCTION");
+     const char *enabled = evt->findParam("ENABLED");
+@@ -207,6 +259,7 @@ void VolumeManager::handleUsbCompositeEvent(NetlinkEvent *evt) {
+         }
+     }
+ }
++#endif
+ 
+ void VolumeManager::handleBlockEvent(NetlinkEvent *evt) {
+     const char *devpath = evt->findParam("DEVPATH");
+@@ -908,12 +961,28 @@ int VolumeManager::mountObb(const char *img, const char *key, int ownerUid) {
+ 
+ int VolumeManager::mountVolume(const char *label) {
+     Volume *v = lookupVolume(label);
++    VolumeCollection::iterator it;
+ 
+     if (!v) {
+         errno = ENOENT;
+         return -1;
+     }
+ 
++    if (mDebug) SLOGD("Mounting %s", v->getMountpoint());
++    for (it = mVolumes->begin(); it != mVolumes->end(); ++it) {
++
++        Volume *cur = *it;
++        const char *mountpoint = cur->getMountpoint();
++        if (mDebug) SLOGD("checking mountpoint %s", mountpoint);
++        if (!strcmp(v->getMountpoint(), mountpoint)) continue;
++        if (cur->isPrefixOf(v) && cur->getState() != Volume::State_Mounted)
++        {
++            int tmp_ret = cur->mountVol();
++            if (tmp_ret < 0)
++                return tmp_ret;
++        }
++    }
++
+     return v->mountVol();
+ }
+ 
+@@ -969,7 +1038,14 @@ int VolumeManager::shareAvailable(const char *method, bool *avail) {
+         return -1;
+     }
+ 
++#ifdef USE_USB_MASS_STORAGE_SWITCH
++    if (mUsbMassStorageConnected)
++        *avail = true;
++    else
++        *avail = false;
++#else
+     *avail = massStorageAvailable();
++#endif
+     return 0;
+ }
+ 
+@@ -998,9 +1074,18 @@ int VolumeManager::simulate(const char *cmd, const char *arg) {
+ 
+     if (!strcmp(cmd, "ums")) {
+         if (!strcmp(arg, "connect")) {
++
++#ifdef USE_USB_MASS_STORAGE_SWITCH
++            notifyUmsConnected(true);
++#else
+             notifyUmsAvailable(true);
++#endif
+         } else if (!strcmp(arg, "disconnect")) {
++#ifdef USE_USB_MASS_STORAGE_SWITCH
++            notifyUmsConnected(false);
++#else
+             notifyUmsAvailable(false);
++#endif
+         } else {
+             errno = EINVAL;
+             return -1;
+@@ -1012,6 +1097,35 @@ int VolumeManager::simulate(const char *cmd, const char *arg) {
+     return 0;
+ }
+ 
++int VolumeManager::openLun(int number) {
++static const char *LUN_FILES[] = {
++#ifdef CUSTOM_LUN_FILE
++	CUSTOM_LUN_FILE,
++#endif
++	"/sys/devices/platform/usb_mass_storage/lun%d/file",
++	"/sys/devices/platform/msm_hsusb/gadget/lun%d/file",
++	NULL
++};
++
++    const char **iterator = LUN_FILES;
++    char qualified_lun[255];
++    while (*iterator) {
++	bzero(qualified_lun, 255);
++	snprintf(qualified_lun, 254, *iterator, number);
++        int fd = open(qualified_lun, O_WRONLY);
++        if (fd >= 0) {
++            SLOGD("Opened lunfile %s", qualified_lun);
++            return fd;
++        }
++        SLOGE("Unable to open ums lunfile %s (%s)", qualified_lun, strerror(errno));
++        iterator++;
++    }
++
++    errno = EINVAL;
++    SLOGE("Unable to find ums lunfile for LUN %d", number);
++    return -1;
++}
++
+ int VolumeManager::shareVolume(const char *label, const char *method) {
+     Volume *v = lookupVolume(label);
+ 
+@@ -1036,27 +1150,44 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
+     }
+ 
+     if (v->getState() != Volume::State_Idle) {
+-        // You need to unmount manually befoe sharing
++        // You need to unmount manually before sharing
+         errno = EBUSY;
+         return -1;
+     }
+ 
+-    dev_t d =  v->getDiskDeviceNode();
++    dev_t d = v->getShareDevice();
+     if ((MAJOR(d) == 0) && (MINOR(d) == 0)) {
+         // This volume does not support raw disk access
+         errno = EINVAL;
+         return -1;
+     }
+ 
+-    int fd;
++#ifdef VOLD_EMMC_SHARES_DEV_MAJOR
++    // If emmc and sdcard share dev major number, vold may pick
++    // incorrectly based on partition nodes alone. Use device nodes instead.
++    v->getDeviceNodes((dev_t *) &d, 1);
++    if ((MAJOR(d) == 0) && (MINOR(d) == 0)) {
++        // This volume does not support raw disk access
++        errno = EINVAL;
++        return -1;
++    }
++#endif
++
++    int fd, lun_number;
+     char nodepath[255];
+     snprintf(nodepath,
+              sizeof(nodepath), "/dev/block/vold/%d:%d",
+              MAJOR(d), MINOR(d));
+ 
+-    if ((fd = open("/sys/devices/platform/usb_mass_storage/lun0/file",
+-                   O_WRONLY)) < 0) {
+-        SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
++    // TODO: Currently only two mounts are supported, defaulting
++    // /mnt/sdcard to lun0 and anything else to lun1. Fix this.
++    if (0 == strcmp(label, "/mnt/sdcard")) {
++        lun_number = 0;
++    } else {
++        lun_number = SECOND_LUN_NUM;
++    }
++
++    if ((fd = openLun(lun_number)) < 0) {
+         return -1;
+     }
+ 
+@@ -1065,6 +1196,7 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
+         close(fd);
+         return -1;
+     }
++    SLOGD("Wrote %s", nodepath);
+ 
+     close(fd);
+     v->handleVolumeShared();
+@@ -1105,8 +1237,16 @@ int VolumeManager::unshareVolume(const char *label, const char *method) {
+     }
+ 
+     int fd;
+-    if ((fd = open("/sys/devices/platform/usb_mass_storage/lun0/file", O_WRONLY)) < 0) {
+-        SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
++    int lun_number;
++
++    // /mnt/sdcard to lun0 and anything else to lun1. Fix this.
++    if (0 == strcmp(label, "/mnt/sdcard")) {
++        lun_number = 0;
++    } else {
++        lun_number = SECOND_LUN_NUM;
++    }
++
++    if ((fd = openLun(lun_number)) < 0) {
+         return -1;
+     }
+ 
+@@ -1134,6 +1274,7 @@ int VolumeManager::unshareVolume(const char *label, const char *method) {
+ 
+ int VolumeManager::unmountVolume(const char *label, bool force) {
+     Volume *v = lookupVolume(label);
++    VolumeCollection::iterator it;
+ 
+     if (!v) {
+         errno = ENOENT;
+@@ -1152,6 +1293,21 @@ int VolumeManager::unmountVolume(const char *label, bool force) {
+         return -1;
+     }
+ 
++    if (mDebug) SLOGD("Unmounting %s", v->getMountpoint());
++    for (it = --(mVolumes->end()); it != mVolumes->end(); it--) {
++        Volume *cur = *it;
++        const char *mountpoint = cur->getMountpoint();
++        if (mDebug) SLOGD("checking mountpoint %s", mountpoint);
++        if (!strcmp(v->getMountpoint(), mountpoint)) continue;
++        if (v->isPrefixOf(cur) && cur->getState() == Volume::State_Mounted)
++        {
++            cleanupAsec(cur, force);
++            int tmp_ret = cur->unmountVol(force);
++            if (tmp_ret < 0)
++                return tmp_ret;
++        }
++    }
++
+     cleanupAsec(v, force);
+ 
+     return v->unmountVol(force);
+@@ -1202,6 +1358,11 @@ bool VolumeManager::isMountpointMounted(const char *mp)
+ }
+ 
+ int VolumeManager::cleanupAsec(Volume *v, bool force) {
++    /* Only EXTERNAL_STORAGE needs ASEC cleanup. */
++    const char *externalPath = getenv("EXTERNAL_STORAGE") ?: "/mnt/sdcard";
++    if (0 != strcmp(v->getMountpoint(), externalPath))
++        return 0;
++
+     while(mActiveContainers->size()) {
+         AsecIdCollection::iterator it = mActiveContainers->begin();
+         ContainerData* cd = *it;
+diff --git system/vold/VolumeManager.h system/vold/VolumeManager.h
+index 11b5ed3..a9b8b5a 100644
+--- system/vold/VolumeManager.h
++++ system/vold/VolumeManager.h
+@@ -27,6 +27,10 @@
+ /* The length of an MD5 hash when encoded into ASCII hex characters */
+ #define MD5_ASCII_LENGTH_PLUS_NULL ((MD5_DIGEST_LENGTH*2)+1)
+ 
++#ifndef CUSTOM_SECOND_LUN_NUM
++#define CUSTOM_SECOND_LUN_NUM 1
++#endif
++
+ typedef enum { ASEC, OBB } container_type_t;
+ 
+ class ContainerData {
+@@ -50,6 +54,10 @@ public:
+ typedef android::List<ContainerData*> AsecIdCollection;
+ 
+ class VolumeManager {
++
++public:
++    static const int SECOND_LUN_NUM = CUSTOM_SECOND_LUN_NUM;
++
+ private:
+     static VolumeManager *sInstance;
+ 
+@@ -58,8 +66,13 @@ private:
+ 
+     VolumeCollection      *mVolumes;
+     AsecIdCollection      *mActiveContainers;
++
++#ifdef USE_USB_MASS_STORAGE_SWITCH
++    bool                   mUsbMassStorageConnected;
++#else
+     bool                   mUsbMassStorageEnabled;
+     bool                   mUsbConnected;
++#endif
+     bool                   mDebug;
+ 
+     // for adjusting /proc/sys/vm/dirty_ratio when UMS is active
+@@ -75,7 +88,9 @@ public:
+ 
+     void handleBlockEvent(NetlinkEvent *evt);
+     void handleSwitchEvent(NetlinkEvent *evt);
++#ifndef USE_USB_MASS_STORAGE_SWITCH
+     void handleUsbCompositeEvent(NetlinkEvent *evt);
++#endif
+ 
+     int addVolume(Volume *v);
+ 
+@@ -111,6 +126,9 @@ public:
+ 
+     void setDebug(bool enable);
+ 
++#ifdef USE_USB_MASS_STORAGE_SWITCH
++    void notifyUmsConnected(bool connected);
++#endif
+     // XXX: Post froyo this should be moved and cleaned up
+     int cleanupAsec(Volume *v, bool force);
+ 
+@@ -123,11 +141,14 @@ public:
+ 
+ private:
+     VolumeManager();
+-    void readInitialState();
++
+     Volume *lookupVolume(const char *label);
+     bool isMountpointMounted(const char *mp);
+-
++#ifndef USE_USB_MASS_STORAGE_SWITCH
++    void readInitialState();
+     inline bool massStorageAvailable() const { return mUsbMassStorageEnabled && mUsbConnected; }
+     void notifyUmsAvailable(bool available);
++#endif
++    int openLun(int number);
+ };
+ #endif
+diff --git system/vold/main.cpp system/vold/main.cpp
+index 8a9cb40..3785a84 100644
+--- system/vold/main.cpp
++++ system/vold/main.cpp
+@@ -23,7 +23,6 @@
+ 
+ #include <fcntl.h>
+ #include <dirent.h>
+-#include <cutils/properties.h>
+ 
+ #define LOG_TAG "Vold"
+ 
+@@ -32,7 +31,7 @@
+ #include "VolumeManager.h"
+ #include "CommandListener.h"
+ #include "NetlinkManager.h"
+-#include "DirectVolume.h"
++#include "AutoVolume.h"
+ 
+ static int process_config(VolumeManager *vm);
+ static void coldboot(const char *path);
+@@ -43,6 +42,7 @@ int main() {
+     CommandListener *cl;
+     NetlinkManager *nm;
+ 
++
+     SLOGI("Vold 2.1 (the revenge) firing up");
+ 
+     mkdir("/dev/block/vold", 0755);
+@@ -78,6 +78,35 @@ int main() {
+     }
+ 
+     coldboot("/sys/block");
++
++#ifdef USE_USB_MASS_STORAGE_SWITCH
++
++    /*
++     * Switch uevents are broken.
++     * For now we manually bootstrap
++     * the ums switch
++     */
++    {
++        FILE *fp;
++        char state[255];
++        if ((fp = fopen("/sys/devices/virtual/switch/usb_mass_storage/state",
++                         "r"))) {
++            if (fgets(state, sizeof(state), fp)) {
++                if (!strncmp(state, "online", 6)) {
++                    vm->notifyUmsConnected(true);
++                } else {
++                    vm->notifyUmsConnected(false);
++                }
++            } else {
++                SLOGE("Failed to read switch state (%s)", strerror(errno));
++            }
++            fclose(fp);
++        } else {
++            SLOGW("No UMS switch available");
++        }
++    }
++#endif
++
+ //    coldboot("/sys/class/switch");
+ 
+     /*
+@@ -145,19 +174,40 @@ static void coldboot(const char *path)
+ static int process_config(VolumeManager *vm) {
+     FILE *fp;
+     int n = 0;
+-    char line[255];
+-    int sdcard_partition_override = 0;
+-    char value[PROPERTY_VALUE_MAX];
++    char line[1024];
++    Volume *vol = 0;
++
++    if ((fp = fopen("/proc/cmdline", "r"))) {
++        while (fscanf(fp, "%1023s", line) > 0) {
++            if (!strncmp(line, "SDCARD=", 7)) {
++                const char *sdcard = line + 7;
++                if (*sdcard) {
++                    // FIXME: should not hardcode the label and mount_point
++                    if ((vol = new AutoVolume(vm, "sdcard", "/mnt/sdcard", sdcard))) {
++                        vm->addVolume(vol);
++                        break;
++                    }
++                }
++            }
++        }
++        fclose(fp);
++    }
+ 
+     if (!(fp = fopen("/etc/vold.fstab", "r"))) {
+-        return -1;
++        // no volume added yet, create a AutoVolume object
++        // to mount USB/MMC/SD automatically
++        if (!vol) {
++            // FIXME: should not hardcode the label and mount_point
++            vol = new AutoVolume(vm, "sdcard", "/mnt/sdcard");
++            if (vol)
++                vm->addVolume(vol);
++        }
++        return vol ? 0 : -ENOMEM;
+     }
+ 
+-    property_get("ro.emmc.sdcard.partition", value, "");
+-    sdcard_partition_override = atoi(value);
+-
+     while(fgets(line, sizeof(line), fp)) {
+-        char *next = line;
++        const char *delim = " \t";
++        char *save_ptr;
+         char *type, *label, *mount_point;
+ 
+         n++;
+@@ -166,49 +216,51 @@ static int process_config(VolumeManager *vm) {
+         if (line[0] == '#' || line[0] == '\0')
+             continue;
+ 
+-        if (!(type = strsep(&next, " \t"))) {
++        if (!(type = strtok_r(line, delim, &save_ptr))) {
+             SLOGE("Error parsing type");
+             goto out_syntax;
+         }
+-        if (!(label = strsep(&next, " \t"))) {
++        if (!(label = strtok_r(NULL, delim, &save_ptr))) {
+             SLOGE("Error parsing label");
+             goto out_syntax;
+         }
+-        if (!(mount_point = strsep(&next, " \t"))) {
++        if (!(mount_point = strtok_r(NULL, delim, &save_ptr))) {
+             SLOGE("Error parsing mount point");
+             goto out_syntax;
+         }
+ 
+         if (!strcmp(type, "dev_mount")) {
+             DirectVolume *dv = NULL;
+-            char *part, *sysfs_path;
++            char *part;
+ 
+-            if (!(part = strsep(&next, " \t"))) {
++            if (!(part = strtok_r(NULL, delim, &save_ptr))) {
+                 SLOGE("Error parsing partition");
+                 goto out_syntax;
+             }
+-            if (strcmp(part, "auto") && atoi(part) == 0) {
++
++            int idx = (strcmp(part, "auto") ? atoi(part) : -1);
++            if (!idx) {
+                 SLOGE("Partition must either be 'auto' or 1 based index instead of '%s'", part);
+                 goto out_syntax;
+             }
+ 
+-            if (!strcmp(part, "auto")) {
+-                dv = new DirectVolume(vm, label, mount_point, -1);
+-            } else {
+-                dv = new DirectVolume(vm, label, mount_point, atoi(part));
+-            }
+-
+-            if ((!strcmp(label, "sdcard")) && sdcard_partition_override)  {
+-                SLOGI("Setting Overriding SD card partition to %d", sdcard_partition_override);
+-                dv->setOverrideSDPartition(sdcard_partition_override);
+-            }
+-            while((sysfs_path = strsep(&next, " \t"))) {
++            const char *sdcard = 0;
++            while (char *sysfs_path = strtok_r(NULL, delim, &save_ptr)) {
++                if ((sdcard = strncmp(sysfs_path,
++                                "SDCARD=", 7) ? 0 : sysfs_path + 7))
++                    break;
++                if (!dv) {
++                    dv = new DirectVolume(vm, label, mount_point, idx);
++                }
+                 if (dv->addPath(sysfs_path)) {
+                     SLOGE("Failed to add devpath %s to volume %s", sysfs_path,
+                          label);
+                     goto out_fail;
+                 }
+             }
++            if (!dv) {
++                dv = new AutoVolume(vm, label, mount_point, sdcard);
++            }
+             vm->addVolume(dv);
+         } else if (!strcmp(type, "map_mount")) {
+         } else {

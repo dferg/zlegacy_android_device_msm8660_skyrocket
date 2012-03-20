@@ -40,6 +40,10 @@ on boot
     chown system system /sys/class/timed_output/vibrator/enable
 	chmod 0664 /sys/class/timed_output/vibrator/enable    
 
+on early-fs
+    mkdir /mnt/external_sd 0000 system system
+    symlink /mnt/external_sd /external_sd
+
 on emmc-fs
     mount ext3 /dev/block/mmcblk0p24 /system remount rw
     mkdir /system/etc/firmware/misc 0771 system system
