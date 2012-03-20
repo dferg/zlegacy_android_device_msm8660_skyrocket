@@ -6,7 +6,7 @@ It is derived from the Code Aurora project's msm8660_surf device tree.  See: htt
 
 Use the gingerbread_house branch with the M8260AAABQNLZA307007.xml manifest.
 
-Discussion is on XDA in this thread: http://forum.xda-developers.com/showthread.php?t=1551860
+Discussion is on XDA in this thread: http://forum.xda-developers.com/showthread.php?t=1551918
 
 Instructions for use
 --------------------
