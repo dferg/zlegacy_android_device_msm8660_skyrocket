@@ -10,6 +10,9 @@ Discussion is on XDA in this thread: http://forum.xda-developers.com/showthread.
 
 Instructions for use
 --------------------
+Set up your environment according to Google's instructions here:
+http://source.android.com/source/initializing.html
+
 Check out the Code Aurora repo.  I used the following command:
 <pre>
 mkdir android-skyrocket
@@ -40,27 +43,22 @@ choosecombo 1 2 msm8660_surf eng
 make -j4 KERNEL_DEFCONFIG=msm8660_defconfig
 </pre>
 
+Install the resulting zip to your Skyrocket using CWM. Then, install Da_G's 0.41 kernel.
+
 Building with proprietary blobs
 -------------------------------
-This build does not complete without other hacks to the tree.  I will try to outline them:
-
-* comment out "LOCAL_WHOLE_STATIC_LIBRARIES += libqc-dalvik" in dalvik/vm/Dvm.mk
-* comment out "LOCAL_WHOLE_STATIC_LIBRARIES += libqc-skia" in external/skia/Android.mk
-* comment out "LOCAL_WHOLE_STATIC_LIBRARIES += libqc-sqlite" in external/sqlite/dist/Android.mk
-* add "static bool isSeperatedStream(stream_type stream);" to frameworks/base/include/media/AudioSystem.mk just after isBluetoothScoDevice()
-* add "bool AudioSystem::isSeperatedStream(stream_type stream) { return true; }" to frameworks/base/media/libmedia/AudioSystem.cpp
-* remove "libaudio-msm8660" from line "msm8660_dirs := $(common_msm_dirs) libaudio-msm8660 liboverlay libcopybit dspcrashd" in hardware/msm7k/Android.mk
-
-The resulting build does not boot fully.  It crashes before displaying anything on the screen.
-However, adb does work so we can debug.
+This build does not complete without other hacks to the tree.  The apply_patches.sh script will perform the necessary patches.
 
 Use these commands to build:
 <pre>
 cd device/qcom/msm8660_surf
 ./extract-files.pl
+./apply_patches.sh
+cd ../../..
 source build/envsetup.sh
 QC_PROP=true choosecombo 1 2 msm8660_surf eng
 QC_PROP=true make -j4 KERNEL_DEFCONFIG=msm8660_defconfig
 </pre>
 
+Install the resulting zip to your Skyrocket using CWM. Then, install Da_G's 0.41 kernel.
 
